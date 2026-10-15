@@ -6,7 +6,7 @@ your code word. Wrong guesses add 15 seconds.
 
 ## Install
 
-1. Open `dist/Overwork.dmg` and drag Overwork to Applications.
+1. Open `Overwork.dmg` and drag Overwork to Applications.
 2. First launch: right-click the app and choose **Open** (it is signed locally, not notarized).
 3. macOS asks for **Screen Recording**. Allow it, then quit and reopen Overwork.
    Without it the hole swallows a starfield instead of your actual screen.
