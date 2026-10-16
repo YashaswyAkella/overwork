@@ -24,6 +24,10 @@ enum RenderTest {
     private static func render(image: CGImage?, width: Int, height: Int, to path: String) {
         guard let device = MTLCreateSystemDefaultDevice(),
               let r = BlackHoleRenderer(device: device, image: image) else { print("renderer unavailable"); return }
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--variant"), i + 1 < args.count, let n = Int(args[i + 1]) {
+            r.variant = HoleVariant.all[n % HoleVariant.all.count]
+        }
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
         td.usage = [.renderTarget, .shaderRead]
         td.storageMode = .shared

@@ -11,6 +11,8 @@ final class AppState: ObservableObject {
     @Published private(set) var failedAttempts = 0
     /// True when the work interval is over but a call is keeping the break from starting.
     @Published private(set) var waitingForCall = false
+    @Published private(set) var variant: HoleVariant = .random()
+    private var previewIndex = 0
     @Published var settings: Settings {
         didSet { settings.save(); onChange?() }
     }
@@ -94,6 +96,12 @@ final class AppState: ObservableObject {
     func startBreak(preview: Bool = false) {
         guard phase != .onBreak else { return }
         waitingForCall = false
+        if preview {
+            variant = HoleVariant.all[previewIndex % HoleVariant.all.count]   // previews cycle through every look
+            previewIndex += 1
+        } else {
+            variant = .random()
+        }
         phase = .onBreak
         isPreview = preview
         failedAttempts = 0

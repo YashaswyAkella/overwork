@@ -28,6 +28,7 @@ Overwork is a **macOS menu bar app**, not just another notification you can swip
 - **Pause intelligently:** Five minutes without keyboard or mouse input stops idle time from counting as work. Being away for a full break duration resets the clock.
 - **Respect calls:** If another app is using the camera or microphone at the end of an interval, Overwork delays the break until the call ends. This can be changed in Settings.
 - **Meet the black hole:** Overwork captures your displays and uses a Metal shader to distort them into a dramatic black hole effect, with a thin accretion disk, gravitational lensing and Doppler-inspired lighting.
+- **Three real black holes:** Each break picks one at random, rendered by the same simulator from the object's known geometry. **TON 618**, the hyperluminous quasar, seen edge on with a white-hot disk. **M87\***, matching the 2019 Event Horizon Telescope image: 17° from the pole, a thick orange ring brighter to the south. **Sagittarius A\***, matching the 2022 EHT image: a thinner ring with three bright knots and gas that moves in minutes. The preview cycles through them.
 - **Take two minutes:** A full-screen break appears across your displays. During the break, the app restricts the Dock, menu bar, app switching, Force Quit and Quit.
 - **Exit early when needed:** Click the large timer to enter your code word. An incorrect guess adds **15 seconds**.
 
@@ -40,6 +41,11 @@ Screens pull at our attention. We keep scrolling, working and clicking, and sudd
 Overwork makes that invisible pull visible. When the black hole appears, it's a cue to break the spell: look away from the screen, move, and return on your own terms.
 
 **Your screen pulls you in. Overwork pulls you out.**
+
+## Privacy
+
+Everything stays on your Mac: no network, no analytics, no stored screenshots. See
+[PRIVACY.md](PRIVACY.md) for exactly what the app reads and why.
 
 ## Build from source
 

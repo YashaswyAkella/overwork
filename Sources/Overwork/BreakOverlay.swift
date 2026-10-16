@@ -42,7 +42,7 @@ final class BreakOverlayController {
             w.acceptsMouseMovedEvents = true
 
             let container = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
-            let hole = BlackHoleView(frame: container.bounds, image: img)
+            let hole = BlackHoleView(frame: container.bounds, image: img, variant: state.variant)
             hole.autoresizingMask = [.width, .height]
             let hud = NSHostingView(rootView: BreakHUD(state: state))
             hud.frame = container.bounds
@@ -106,7 +106,7 @@ struct BreakHUD: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Text(state.isPreview ? "Preview" : "Look away from the screen")
+            Text(state.isPreview ? "Preview: \(state.variant.name)" : "Look away from the screen")
                 .font(.system(size: 24, weight: .light, design: .rounded))
                 .foregroundStyle(.white.opacity(0.85))
                 .shadow(color: .black, radius: 14)
@@ -160,7 +160,7 @@ struct BreakHUD: View {
         .padding(40)
         .modifier(Shake(animatableData: shakes))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-        .offset(y: -0.07 * (NSScreen.main?.frame.height ?? 900)) // sit in the dark upper half of the shadow
+        .offset(y: state.variant.hudOffset * (NSScreen.main?.frame.height ?? 900)) // keep the timer in the dark part of the shadow
     }
 
     private func attempt() {
