@@ -8,7 +8,6 @@ final class AppState: ObservableObject {
     @Published private(set) var phase: Phase = .working
     @Published private(set) var remaining: TimeInterval
     @Published private(set) var isPreview = false
-    @Published private(set) var failedAttempts = 0
     /// True when the work interval is over but a call is keeping the break from starting.
     @Published private(set) var waitingForCall = false
     @Published private(set) var variant: HoleVariant = .random()
@@ -34,7 +33,6 @@ final class AppState: ObservableObject {
         remaining = s.workInterval
     }
 
-    var hasCodeWord: Bool { settings.codeWordHash != nil }
 
     var timeString: String {
         let t = max(Int(remaining.rounded(.up)), 0)
@@ -104,7 +102,6 @@ final class AppState: ObservableObject {
         }
         phase = .onBreak
         isPreview = preview
-        failedAttempts = 0
         remaining = preview ? 12 : settings.breakLength
         onChange?()
         Task { await overlay.show(state: self) }
@@ -121,14 +118,9 @@ final class AppState: ObservableObject {
         onBreakEnded?()
     }
 
-    /// Returns true when the break was unlocked. Wrong guesses add 15 seconds.
-    func attemptUnlock(_ code: String) -> Bool {
-        guard phase == .onBreak else { return true }
-        if isPreview || settings.matches(code) { endBreak(); return true }
-        failedAttempts += 1
-        remaining += 15
-        onChange?()
-        return false
+    /// Previews can be dismissed by clicking the timer; a real break runs its course.
+    func closePreview() {
+        if phase == .onBreak && isPreview { endBreak() }
     }
 
     func togglePause() {
@@ -144,14 +136,6 @@ final class AppState: ObservableObject {
         guard phase != .onBreak else { return }
         remaining = settings.workInterval
         onChange?()
-    }
-
-    func setCodeWord(_ word: String?) {
-        if let w = word?.trimmingCharacters(in: .whitespacesAndNewlines), !w.isEmpty {
-            settings.codeWordHash = Settings.hash(w)
-        } else {
-            settings.codeWordHash = nil
-        }
     }
 
     /// Returns an error message, or nil on success.

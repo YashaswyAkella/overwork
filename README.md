@@ -16,7 +16,7 @@ Overwork is a **macOS menu bar app**, not just another notification you can swip
 2. Open the DMG and drag **Overwork** into **Applications**.
 3. Launch Overwork. Because this early build is **locally signed but not Apple-notarized**, macOS may prevent it from opening. If you trust the downloaded app, find it under **System Settings → Privacy & Security** and choose **Open Anyway** if offered.
 4. Allow **Screen Recording** when macOS asks, then quit and reopen Overwork. Without this permission, the effect shows a starfield instead of your actual screen.
-5. Set your personal **code word** in the settings window.
+5. Adjust the work and break lengths in the settings window if you like.
 
 **Requirements:** macOS 14 Sonoma or newer.
 
@@ -30,7 +30,7 @@ Overwork is a **macOS menu bar app**, not just another notification you can swip
 - **Meet the black hole:** Overwork captures your displays and uses a Metal shader to distort them into a dramatic black hole effect, with a thin accretion disk, gravitational lensing and Doppler-inspired lighting.
 - **Three real black holes:** Each break picks one at random, rendered by the same simulator from the object's known geometry. **TON 618**, the hyperluminous quasar, seen edge on with a white-hot disk. **M87\***, matching the 2019 Event Horizon Telescope image: 17° from the pole, a thick orange ring brighter to the south. **Sagittarius A\***, matching the 2022 EHT image: a thinner ring with three bright knots and gas that moves in minutes. The preview cycles through them.
 - **Take two minutes:** A full-screen break appears across your displays. During the break, the app restricts the Dock, menu bar, app switching, Force Quit and Quit.
-- **Exit early when needed:** Click the large timer to enter your code word. An incorrect guess adds **15 seconds**.
+- **No early exit:** the break ends when the timer reaches zero. That is the point.
 
 From the menu bar, you can also **take a break now**, **preview the effect for 12 seconds**, **pause**, **reset**, open **Settings**, or **Quit** outside the break experience.
 
@@ -76,7 +76,7 @@ open dist/Overwork.app --env OVERWORK_FPS_LOG=/tmp/fps.txt --args --preview
 
 | Path | Purpose |
 | --- | --- |
-| `Sources/Overwork/AppState.swift` | Timer, idle tracking and code-word checks |
+| `Sources/Overwork/AppState.swift` | Timer and idle tracking |
 | `Sources/Overwork/BlackHole.swift` | Metal renderer, view and shader |
 | `Sources/Overwork/BreakOverlay.swift` | Full-screen windows and break timer |
 | `Sources/Overwork/StatusBar.swift` | Menu bar controls |

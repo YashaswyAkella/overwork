@@ -25,9 +25,6 @@ final class SettingsWindowController {
 
 struct SettingsView: View {
     @ObservedObject var state: AppState
-    @State private var newCode = ""
-    @State private var confirmCode = ""
-    @State private var codeMessage = ""
     @State private var loginMessage = ""
 
     var body: some View {
@@ -41,27 +38,6 @@ struct SettingsView: View {
                 Toggle("Wait for calls to end", isOn: $state.settings.respectCalls)
                 Text("While another app is using the microphone or camera (Zoom, Teams, WhatsApp, FaceTime, Meet), the break is held until the call ends.")
                     .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Section("Escape code word") {
-                Text(state.hasCodeWord
-                     ? "A code word is set. During a break, click the timer and type it to end the break early. Each wrong guess adds 15 seconds."
-                     : "No code word set. Breaks cannot be ended early.")
-                    .font(.caption).foregroundStyle(.secondary)
-                SecureField("New code word", text: $newCode)
-                SecureField("Confirm code word", text: $confirmCode)
-                HStack {
-                    Button("Save code word") {
-                        let a = newCode.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if a.isEmpty { codeMessage = "Type a code word first." }
-                        else if a != confirmCode.trimmingCharacters(in: .whitespacesAndNewlines) { codeMessage = "The two entries don't match." }
-                        else { state.setCodeWord(a); newCode = ""; confirmCode = ""; codeMessage = "Saved." }
-                    }
-                    if state.hasCodeWord {
-                        Button("Remove") { state.setCodeWord(nil); codeMessage = "Removed. No early exit now." }
-                    }
-                    Text(codeMessage).font(.caption).foregroundStyle(.secondary)
-                }
             }
 
             Section("System") {

@@ -98,11 +98,6 @@ final class BreakOverlayController {
 
 struct BreakHUD: View {
     @ObservedObject var state: AppState
-    @State private var showEntry = false
-    @State private var code = ""
-    @State private var message = ""
-    @State private var shakes: CGFloat = 0
-    @FocusState private var focused: Bool
 
     var body: some View {
         VStack(spacing: 14) {
@@ -112,9 +107,7 @@ struct BreakHUD: View {
                 .shadow(color: .black, radius: 14)
 
             Button {
-                if state.isPreview { _ = state.attemptUnlock(""); return }
-                withAnimation(.easeOut(duration: 0.2)) { showEntry.toggle() }
-                focused = showEntry
+                state.closePreview()
             } label: {
                 Text(state.timeString)
                     .font(.system(size: 104, weight: .thin, design: .rounded))
@@ -125,57 +118,15 @@ struct BreakHUD: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Click to enter your code word")
+            .disabled(!state.isPreview)
 
-            Text(state.isPreview ? "Click the timer to close." : "Find something 20 feet away. Blink. Breathe.")
+            Text(state.isPreview ? "Click the timer to close." : "Find something 20 feet away. Blink. Breathe. The hole closes on its own.")
                 .font(.system(size: 15, design: .rounded))
                 .foregroundStyle(.white.opacity(0.7))
                 .shadow(color: .black, radius: 12)
-
-            if showEntry && !state.isPreview {
-                if !state.hasCodeWord {
-                    Text("No code word is set. Wait it out.")
-                        .foregroundStyle(.orange)
-                        .padding(.top, 8)
-                } else {
-                    HStack(spacing: 10) {
-                        SecureField("code word", text: $code)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 18, design: .rounded))
-                            .foregroundStyle(.white)
-                            .padding(10)
-                            .frame(width: 240)
-                            .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-                            .focused($focused)
-                            .onSubmit(attempt)
-                        Button("Unlock", action: attempt).buttonStyle(.bordered)
-                    }
-                    .padding(.top, 8)
-                    if !message.isEmpty {
-                        Text(message).foregroundStyle(.orange)
-                    }
-                }
-            }
         }
         .padding(40)
-        .modifier(Shake(animatableData: shakes))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .offset(y: state.variant.hudOffset * (NSScreen.main?.frame.height ?? 900)) // keep the timer in the dark part of the shadow
-    }
-
-    private func attempt() {
-        if state.attemptUnlock(code) { return }
-        code = ""
-        message = ["Nope. +15 s", "Wrong. +15 s", "Still no. +15 s", "The hole disagrees. +15 s"].randomElement()!
-        withAnimation(.default) { shakes += 1 }
-    }
-}
-
-struct Shake: GeometryEffect {
-    var amount: CGFloat = 12
-    var shakesPerUnit: CGFloat = 3
-    var animatableData: CGFloat
-    func effectValue(size: CGSize) -> ProjectionTransform {
-        ProjectionTransform(CGAffineTransform(translationX: amount * sin(animatableData * .pi * shakesPerUnit), y: 0))
     }
 }
