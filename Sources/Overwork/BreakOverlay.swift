@@ -23,7 +23,9 @@ final class BreakOverlayController {
         for screen in NSScreen.screens {
             var img: CGImage? = nil
             if let id = ScreenCapture.displayID(of: screen) {
-                img = await ScreenCapture.capture(displayID: id, size: screen.frame.size)
+                // Native pixels, not points, so the screen behind the hole stays sharp on Retina displays.
+                let scale = screen.backingScaleFactor
+                img = await ScreenCapture.capture(displayID: id, size: CGSize(width: screen.frame.width * scale, height: screen.frame.height * scale))
             }
             shots.append((screen, img))
         }
@@ -42,7 +44,7 @@ final class BreakOverlayController {
             w.acceptsMouseMovedEvents = true
 
             let container = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
-            let hole = BlackHoleView(frame: container.bounds, image: img, variant: state.variant)
+            let hole = BlackHoleView(frame: container.bounds, image: img, variant: state.variant, backingScale: screen.backingScaleFactor)
             hole.autoresizingMask = [.width, .height]
             let hud = NSHostingView(rootView: BreakHUD(state: state))
             hud.frame = container.bounds

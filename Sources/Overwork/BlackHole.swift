@@ -6,7 +6,7 @@ struct HoleUniforms {
     var intensity: Float
     var hasImage: Float
     var center: SIMD2<Float>
-    var pad: SIMD2<Float> = .zero
+    var pixel: SIMD2<Float> = .zero  // x: one pixel in NDC units (2 / height); y: screenshot height in texels
     var elev: Float      // camera elevation above the disk plane, radians
     var roll: Float      // camera roll, radians
     var disk: Float      // 1 = accretion disk present, 0 = bare lensing void
@@ -56,7 +56,13 @@ final class BlackHoleRenderer {
         self.device = device
         self.queue = queue
         do {
-            let lib = try device.makeLibrary(source: blackHoleShaderSource, options: nil)
+            var source = blackHoleShaderSource
+            // Test-only: OVERWORK_TRUTH renders a slow, very fine-stepped reference for accuracy checks.
+            if ProcessInfo.processInfo.environment["OVERWORK_TRUTH"] != nil {
+                source = source.replacingOccurrences(of: "constant int MAX_STEPS = 220;", with: "constant int MAX_STEPS = 6000;")
+                    .replacingOccurrences(of: "* 0.09, 0.025, 1.0);", with: "* 0.09, 0.025, 1.0) / 7.0;")
+            }
+            let lib = try device.makeLibrary(source: source, options: nil)
             let desc = MTLRenderPipelineDescriptor()
             desc.vertexFunction = lib.makeFunction(name: "blackhole_vertex")
             desc.fragmentFunction = lib.makeFunction(name: "blackhole_fragment")
@@ -69,6 +75,7 @@ final class BlackHoleRenderer {
         let sd = MTLSamplerDescriptor()
         sd.minFilter = .linear
         sd.magFilter = .linear
+        sd.mipFilter = .linear   // smooth, grain-free blur when the smear samples coarser mip levels
         sd.sAddressMode = .mirrorRepeat
         sd.tAddressMode = .mirrorRepeat
         guard let s = device.makeSamplerState(descriptor: sd) else { return nil }
@@ -85,10 +92,17 @@ final class BlackHoleRenderer {
         guard let ctx = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info) else { return nil }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: true)
         td.usage = .shaderRead
         guard let tex = device.makeTexture(descriptor: td) else { return nil }
         tex.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: &bytes, bytesPerRow: w * 4)
+        // Build the mip chain on the GPU so blurred lookups are filtered instead of noisy.
+        if let q = device.makeCommandQueue(), let cb = q.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() {
+            blit.generateMipmaps(for: tex)
+            blit.endEncoding()
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
         return tex
     }
 
@@ -106,6 +120,7 @@ final class BlackHoleRenderer {
             intensity: intensity,
             hasImage: texture == nil ? 0 : 1,
             center: SIMD2(0.5 + 0.02 * sin(time * 0.31), 0.5 + 0.015 * cos(time * 0.23)),
+            pixel: SIMD2(2 / Float(max(target.height, 1)), Float(texture?.height ?? 1)),
             elev: variant.elev, roll: variant.roll, disk: variant.disk, warmth: variant.warmth, diskOut: variant.diskOut,
             knots: variant.knots, speed: variant.speed, hot: variant.hot
         )
@@ -124,6 +139,12 @@ final class BlackHoleView: MTKView {
     private var last = CACurrentMediaTime()
     private var intensity: Float = 0
     private var frames = 0
+    /// Pixels per point of the display (2 on Retina). The hole is rendered at full native resolution.
+    private var backingScale: CGFloat
+    /// Drops below 1 only if a slow GPU can't keep up at native resolution.
+    private var quality: CGFloat = 1
+    private var avgDt: Float = 1.0 / 60.0
+    private var settle = 0
     /// 1 = fully open, 0 = closed. The view eases toward this every frame.
     var targetIntensity: Float = 1 {
         didSet {
@@ -139,14 +160,16 @@ final class BlackHoleView: MTKView {
         }
     }
 
-    init(frame: CGRect, image: CGImage?, variant: HoleVariant) {
+    init(frame: CGRect, image: CGImage?, variant: HoleVariant, backingScale: CGFloat) {
         let dev = MTLCreateSystemDefaultDevice()
+        self.backingScale = max(backingScale, 1)
         super.init(frame: frame, device: dev)
         if let dev { renderer = BlackHoleRenderer(device: dev, image: image); renderer?.variant = variant }
         colorPixelFormat = .bgra8Unorm
         framebufferOnly = true
         autoResizeDrawable = false
-        drawableSize = CGSize(width: max(frame.width, 1), height: max(frame.height, 1)) // render at 1x; the blur hides it
+        layer?.contentsScale = self.backingScale
+        updateDrawableSize()
         preferredFramesPerSecond = 60
         isPaused = false
         enableSetNeedsDisplay = false
@@ -155,9 +178,34 @@ final class BlackHoleView: MTKView {
 
     required init(coder: NSCoder) { fatalError("not supported") }
 
+    private func updateDrawableSize() {
+        let s = backingScale * quality
+        drawableSize = CGSize(width: max(bounds.width * s, 1), height: max(bounds.height * s, 1))
+    }
+
     override func layout() {
         super.layout()
-        drawableSize = CGSize(width: max(bounds.width, 1), height: max(bounds.height, 1))
+        updateDrawableSize()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if let w = window { backingScale = w.backingScaleFactor; layer?.contentsScale = backingScale; updateDrawableSize() }
+    }
+
+    /// Native resolution when the GPU keeps up; if the average frame rate stays under 60,
+    /// render slightly below native until it does, rather than stutter.
+    private func adaptQuality(dt: Float) {
+        avgDt += (min(dt, 0.1) - avgDt) * 0.08
+        settle += 1
+        guard settle > 90, quality > 0.6 else { return }
+        if avgDt > 1.0 / 52.0 {
+            quality = max(0.6, quality * 0.85)
+            avgDt = 1.0 / 60.0
+            settle = 15
+            updateDrawableSize()
+            NSLog("Overwork: rendering at %.0f%% of native resolution to keep 60 fps", quality * 100)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -165,6 +213,7 @@ final class BlackHoleView: MTKView {
         let dt = Float(now - last)
         last = now
         frames += 1
+        adaptQuality(dt: dt)
         let speed: Float = targetIntensity > intensity ? 1 / 2.8 : 1 / 0.9
         if intensity < targetIntensity {
             intensity = min(targetIntensity, intensity + dt * speed)
@@ -192,7 +241,7 @@ vertex VOut blackhole_vertex(uint vid [[vertex_id]]) {
     return o;
 }
 
-struct Uniforms { float time; float aspect; float intensity; float hasImage; float2 center; float2 pad;
+struct Uniforms { float time; float aspect; float intensity; float hasImage; float2 center; float2 pixel;
                   float elev; float roll; float disk; float warmth; float diskOut; float knots; float speed; float hot; };
 
 float hash21(float2 p) {
@@ -214,8 +263,8 @@ float fbm(float2 p) {
     return v;
 }
 
-float3 world(float2 uv, float t, float hasImage, texture2d<float> tex, sampler s) {
-    if (hasImage > 0.5) return tex.sample(s, uv).rgb;
+float3 world(float2 uv, float lod, float t, float hasImage, texture2d<float> tex, sampler s) {
+    if (hasImage > 0.5) return tex.sample(s, uv, level(lod)).rgb;
     uv = abs(fract(uv * 0.5) * 2.0 - 1.0); // mirror, like the sampler does
     float2 g = uv * float2(180.0, 100.0);
     float2 cell = floor(g);
@@ -235,6 +284,8 @@ constant float DISK_IN  = 2.4;
 constant float R_INFLUENCE = 15.0;
 constant float CAM_DIST = 20.0;
 constant float FOCAL = 2.6;
+constant float B_CRIT = 2.598076;   // critical impact parameter, 3*sqrt(3)/2: rays below it fall in
+constant int MAX_STEPS = 220;
 
 // Thin disk emission at radius r, azimuth phi, seen along photon direction v (unit, pointing away from camera).
 float3 diskEmission(float r, float phi, float3 v, float t, constant Uniforms& u) {
@@ -278,6 +329,104 @@ float diskAlpha(float r, float diskOut) {
     return 0.97 * smoothstep(0.0, 0.1, x) * smoothstep(1.0, 0.6, x);
 }
 
+struct Camera { float3 pos; float3 fwd; float3 right; float3 up; float D; };
+
+// What one ray found: disk light in front of everything, how much of the background still shows,
+// and where on the screenshot the background comes from.
+struct Hit { float3 disk; float trans; float bgWeight; float2 ndcOut; };
+
+Hit traceRay(float2 ndc, Camera cam, constant Uniforms& u, float edgeSoftness) {
+    float3 dir = normalize(cam.fwd * FOCAL + cam.right * ndc.x + cam.up * ndc.y);
+    float3 p = cam.pos;
+    float3 v = dir;
+    Hit h;
+    h.disk = float3(0.0);
+    h.trans = 1.0;
+    bool captured = false;
+
+    // The impact parameter is conserved along the ray, so the shadow edge is known exactly.
+    float impact = length(cross(cam.pos, dir));
+
+    float b = dot(p, v);
+    float c = dot(p, p) - R_INFLUENCE * R_INFLUENCE;
+    float disc = b * b - c;
+    if (disc > 0.0) {
+        p += v * (-b - sqrt(disc));
+        float3 hv = cross(p, v);
+        float h2 = dot(hv, hv);
+        // Leapfrog (kick-drift-kick): second-order accurate, one force evaluation per step,
+        // so long strides far from the hole stay on the true light path.
+        float r2a = dot(p, p);
+        float3 acc = -1.5 * h2 * p / (r2a * r2a * sqrt(r2a));
+        for (int i = 0; i < MAX_STEPS; i++) {
+            float r2 = dot(p, p);
+            if (r2 < 1.0) { captured = true; break; }
+            if (r2 > R_INFLUENCE * R_INFLUENCE + 1.0 && dot(p, v) > 0.0) break;
+            float r = sqrt(r2);
+            // Finer steps near the photon sphere, where paths are most sensitive; long strides far out.
+            float step = clamp(r * 0.06 * smoothstep(1.2, 3.0, r) + 0.025 + max(r - 5.0, 0.0) * 0.09, 0.025, 1.0);
+            float3 vh = v + acc * (0.5 * step);
+            float3 pn = p + vh * step;
+            float rn2 = dot(pn, pn);
+            float3 accn = -1.5 * h2 * pn / (rn2 * rn2 * sqrt(rn2));
+            float3 vn = vh + accn * (0.5 * step);
+            acc = accn;
+            if (u.disk > 0.5 && p.y * pn.y < 0.0) {
+                float f = p.y / (p.y - pn.y);
+                float3 hit = mix(p, pn, f);
+                float rh = length(hit.xz);
+                if (rh > DISK_IN && rh < u.diskOut) {
+                    float phi = atan2(hit.z, hit.x);
+                    float3 e = diskEmission(rh, phi, normalize(vn), u.time, u);
+                    float al = diskAlpha(rh, u.diskOut);
+                    h.disk += h.trans * e * al;
+                    h.trans *= (1.0 - al);
+                    if (h.trans < 0.01) break;
+                }
+            }
+            p = pn;
+            v = vn;
+        }
+    }
+
+    // Anti-aliased shadow edge: fade the background out across a pixel at the critical impact parameter.
+    h.bgWeight = captured ? 0.0 : smoothstep(B_CRIT - edgeSoftness, B_CRIT + edgeSoftness, impact);
+    float3 vd = normalize(v);
+    float z = max(dot(vd, cam.fwd), 0.05);
+    h.ndcOut = float2(dot(vd, cam.right), dot(vd, cam.up)) / z * FOCAL;
+    return h;
+}
+
+// The screenshot seen along a bent ray, smeared radially (spaghettification).
+// `footprintUV` is how much screenshot one output pixel covers; it picks a mip level so nothing aliases.
+float3 background(float2 uv, float2 ndc, float2 ndcOut, float footprintUV, float ease, int N,
+                  constant Uniforms& u, texture2d<float> tex, sampler s) {
+    // Full lensing near the hole, gentler toward the screen edges so the desktop stays readable there.
+    float gain = mix(0.25, 1.0, smoothstep(1.6, 0.55, length(ndc)));
+    float2 bent = ndc + (ndcOut - ndc) * gain;
+    float2 uvOut = u.center + float2(bent.x / u.aspect, -bent.y) * 0.5;
+    float2 radial = normalize(uv - u.center + 1e-5);
+    float defl = length(bent - ndc);
+    float streak = min(defl * defl * 0.6, 0.06) + 0.004 * ease;
+    // Each tap is blurred enough to overlap its neighbours, so the smear is smooth rather than grainy.
+    float texH = u.pixel.y;
+    float spacing = max(streak / float(N), footprintUV * gain);
+    float lod = clamp(log2(max(spacing * texH, 1.0)), 0.0, 9.0);
+    float3 bg = float3(0.0);
+    for (int i = 0; i < N; i++) {
+        float f = (float(i) + 0.5) / float(N) - 0.5;
+        bg += world(uvOut + radial * (f * streak), lod, u.time, u.hasImage, tex, s);
+    }
+    bg /= float(N);
+    // Rays that land far beyond the screen edge see a mirrored, dimmer copy of it.
+    float outside = max(max(-uvOut.x, uvOut.x - 1.0), max(-uvOut.y, uvOut.y - 1.0));
+    bg *= 1.0 - 0.8 * smoothstep(0.0, 0.3, outside);
+    bg *= mix(1.0, mix(0.55, 0.32, u.disk), ease);
+    float2 vc = (uv - 0.5) * float2(u.aspect, 1.0);
+    bg *= 1.0 - 0.55 * ease * smoothstep(0.35, 1.1, length(vc));
+    return bg;
+}
+
 fragment float4 blackhole_fragment(VOut in [[stage_in]],
                                    constant Uniforms& u [[buffer(0)]],
                                    texture2d<float> tex [[texture(0)]],
@@ -287,98 +436,66 @@ fragment float4 blackhole_fragment(VOut in [[stage_in]],
     float grow = max(ease, 0.01);
     float2 uv = in.uv;
 
-    // Camera, elevated slightly above the disk plane and pulled far away while the hole "grows".
-    float D = CAM_DIST / grow;
-    float3 camPos = float3(0.0, D * sin(u.elev), -D * cos(u.elev));
-    float3 fwd = normalize(-camPos);
-    float3 right0 = normalize(cross(float3(0.0, 1.0, 0.0), fwd));
-    float3 up0 = cross(fwd, right0);
+    // Camera, elevated above the disk plane and pulled far away while the hole "grows".
+    Camera cam;
+    cam.D = CAM_DIST / grow;
+    cam.pos = float3(0.0, cam.D * sin(u.elev), -cam.D * cos(u.elev));
+    cam.fwd = normalize(-cam.pos);
+    float3 right0 = normalize(cross(float3(0.0, 1.0, 0.0), cam.fwd));
+    float3 up0 = cross(cam.fwd, right0);
     float cr = cos(u.roll), sr = sin(u.roll);
-    float3 right = right0 * cr + up0 * sr;
-    float3 up = -right0 * sr + up0 * cr;
+    cam.right = right0 * cr + up0 * sr;
+    cam.up = -right0 * sr + up0 * cr;
 
+    float pix = u.pixel.x;                         // one output pixel in NDC units
     float2 ndc = float2((uv.x - u.center.x) * 2.0 * u.aspect, -(uv.y - u.center.y) * 2.0);
-    float3 dir = normalize(fwd * FOCAL + right * ndc.x + up * ndc.y);
+    float bPerPixel = pix * cam.D / FOCAL;         // how much impact parameter one pixel spans
+    float3 dir0 = normalize(cam.fwd * FOCAL + cam.right * ndc.x + cam.up * ndc.y);
+    float impact = length(cross(cam.pos, dir0));
 
-    float3 p = camPos;
-    float3 v = dir;
-    float3 col = float3(0.0);
-    float trans = 1.0;
-    bool captured = false;
-
-    // Only rays that pass near the hole are marched; the rest go straight to the background.
-    float b = dot(p, v);
-    float c = dot(p, p) - R_INFLUENCE * R_INFLUENCE;
-    float disc = b * b - c;
-    if (disc > 0.0) {
-        p += v * (-b - sqrt(disc));
-        float3 h = cross(p, v);
-        float h2 = dot(h, h);
-        for (int i = 0; i < 160; i++) {
-            float r2 = dot(p, p);
-            if (r2 < 1.0) { captured = true; break; }
-            if (r2 > R_INFLUENCE * R_INFLUENCE + 1.0 && dot(p, v) > 0.0) break;
-            float r = sqrt(r2);
-            float step = clamp(r * 0.07, 0.035, 0.35);
-            float3 a = -1.5 * h2 * p / (r2 * r2 * r);
-            float3 vn = v + a * step;
-            float3 pn = p + vn * step;
-            if (u.disk > 0.5 && p.y * pn.y < 0.0) {
-                float f = p.y / (p.y - pn.y);
-                float3 hit = mix(p, pn, f);
-                float rh = length(hit.xz);
-                if (rh > DISK_IN && rh < u.diskOut) {
-                    float phi = atan2(hit.z, hit.x);
-                    float3 e = diskEmission(rh, phi, normalize(vn), u.time, u);
-                    float al = diskAlpha(rh, u.diskOut);
-                    col += trans * e * al;
-                    trans *= (1.0 - al);
-                    if (trans < 0.01) break;
-                }
-            }
-            p = pn;
-            v = vn;
+    float3 col;
+    // Near the shadow edge light paths change wildly between neighbouring pixels, so use several rays:
+    // 16 in the few pixels around the critical edge (the photon ring is thinner than a pixel), 4 in the band around it.
+    float fromEdge = abs(impact - B_CRIT);
+    int g = fromEdge < 5.0 * bPerPixel ? 4 : (impact > B_CRIT - 0.2 && impact < B_CRIT + 0.7 ? 2 : 1);
+    if (g > 1) {
+        // A rotated regular grid: good coverage of both horizontal and vertical edges.
+        const float ca = 0.894427, sa = 0.447214;  // rotation by atan(1/2)
+        Hit hits[16];
+        int n = g * g;
+        float2 mean = float2(0.0);
+        for (int j = 0; j < n; j++) {
+            float2 o = (float2(float(j % g), float(j / g)) + 0.5) / float(g) - 0.5;
+            o = float2(ca * o.x - sa * o.y, sa * o.x + ca * o.y);
+            hits[j] = traceRay(ndc + o * pix, cam, u, 0.5 * bPerPixel / float(g));
+            mean += hits[j].ndcOut;
         }
-    }
-    col *= ease;
-
-    // Background: the screen itself, seen through the bent ray.
-    float3 bg = float3(0.0);
-    if (!captured && trans > 0.01) {
-        float3 vd = normalize(v);
-        float z = max(dot(vd, fwd), 0.05);
-        float2 ndcOut = float2(dot(vd, right), dot(vd, up)) / z * FOCAL;
-        // Full lensing near the hole, gentler toward the screen edges so the desktop stays readable there.
-        float gain = mix(0.25, 1.0, smoothstep(1.6, 0.55, length(ndc)));
-        ndcOut = ndc + (ndcOut - ndc) * gain;
-        float2 uvOut = u.center + float2(ndcOut.x / u.aspect, -ndcOut.y) * 0.5;
-        // Spaghettification: smear the sample along the radial direction by how much the ray was bent.
-        float2 radial = normalize(uv - u.center + 1e-5);
-        float defl = length(ndcOut - ndc);
-        float streak = min(defl * defl * 0.6, 0.06) + 0.004 * ease; // grows fast only where the bending is strong
-        const int N = 8;
-        float seed = hash21(uv * 1337.0);
-        for (int i = 0; i < N; i++) {
-            float f = (float(i) + seed) / float(N) - 0.5;
-            float2 off = radial * (f * streak);
-            bg += world(uvOut + off, u.time, u.hasImage, tex, s);
+        mean /= float(n);
+        // How far apart the rays land on the screenshot tells how blurred each lookup must be.
+        float spread = 0.0;
+        for (int j = 0; j < n; j++) spread = max(spread, length(hits[j].ndcOut - mean));
+        float footprintUV = max(spread, pix) * 0.5;
+        col = float3(0.0);
+        for (int j = 0; j < n; j++) {
+            float3 bg = hits[j].bgWeight > 0.0 && hits[j].trans > 0.01
+                ? background(uv, ndc, hits[j].ndcOut, footprintUV, ease, g == 4 ? 2 : 4, u, tex, s) : float3(0.0);
+            col += hits[j].disk * ease + hits[j].trans * hits[j].bgWeight * bg;
         }
-        bg /= float(N);
-        // Rays that land far beyond the screen edge see a mirrored, dimmer copy of it.
-        float outside = max(max(-uvOut.x, uvOut.x - 1.0), max(-uvOut.y, uvOut.y - 1.0));
-        bg *= 1.0 - 0.8 * smoothstep(0.0, 0.3, outside);
-        bg *= mix(1.0, mix(0.55, 0.32, u.disk), ease); // the void keeps the screen brighter: it's the show
-        float2 vc = (uv - 0.5) * float2(u.aspect, 1.0);
-        bg *= 1.0 - 0.55 * ease * smoothstep(0.35, 1.1, length(vc));
+        col /= float(n);
+    } else {
+        Hit h = traceRay(ndc, cam, u, bPerPixel);
+        float3 bg = h.bgWeight > 0.0 && h.trans > 0.01
+            ? background(uv, ndc, h.ndcOut, pix * 0.5, ease, 8, u, tex, s) : float3(0.0);
+        col = h.disk * ease + h.trans * h.bgWeight * bg;
     }
-    col += trans * bg;
 
-    // Photon ring and halo in screen space: softens the shadow edge and adds the glow a single pass can't bloom.
-    float rShadow = 2.6 / D * FOCAL;
+    // Photon ring and halo in screen space, for the glow a single pass can't bloom.
+    float rShadow = 2.6 / cam.D * FOCAL;
     float rScreen = length(ndc);
     float3 ringCol = mix(float3(1.0, 0.85, 0.6), float3(1.0, 0.55, 0.2), u.warmth);
-    float ring = exp(-pow((rScreen - rShadow) / (rShadow * 0.06 + 1e-4), 2.0));
-    float halo = exp(-max(rScreen - rShadow, 0.0) / (rShadow * 0.35 + 1e-4)) * step(rShadow, rScreen);
+    float ringW = rShadow * 0.06 + pix;
+    float ring = exp(-((rScreen - rShadow) / ringW) * ((rScreen - rShadow) / ringW));
+    float halo = exp(-max(rScreen - rShadow, 0.0) / (rShadow * 0.35 + 1e-4)) * smoothstep(rShadow - pix, rShadow + pix, rScreen);
     float ringStrength = mix(0.0, 1.1, 1.0 - u.disk);    // disk variants get their ring from the physics
     float haloStrength = mix(0.08, 0.22, 1.0 - u.disk);
     float flicker = 0.9 + 0.1 * sin(u.time * 3.0 + rScreen * 40.0);
